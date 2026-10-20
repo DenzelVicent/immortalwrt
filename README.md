@@ -61,6 +61,9 @@ To build your own firmware you need a GNU/Linux, BSD or macOS system (case sensi
   5. Run `make menuconfig` to select your preferred configuration for the toolchain, target system & firmware packages.
   6. Run `make` to build your firmware. This will download all sources, build the cross-compile toolchain and then cross-compile the GNU/Linux kernel & all chosen applications for your target system.
 
+  ### 本项目固件配置
+  本仓库维护 RAX3000M 与 AX3000T 两份按机型拆分的构建配置，构建步骤与维护约定见 [docs/2026-10-20-固件构建配置说明.md](docs/2026-10-20-固件构建配置说明.md)。
+
   ### Related Repositories
   The main repository uses multiple sub-repositories to manage packages of different categories. All packages are installed via the OpenWrt package manager called opkg. If you're looking to develop the web interface or port packages to ImmortalWrt, please find the fitting repository below.
   - [LuCI Web Interface](https://github.com/immortalwrt/luci): Modern and modular interface to control the device via a web browser.
