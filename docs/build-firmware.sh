@@ -14,6 +14,8 @@
 # 编译场景:
 #   菜单 1-6 选中后展示执行计划并自动跑完清理/配置/编译，无需再手动执行队列
 #   菜单 7 查看最近一次执行队列，菜单 8 查看状态与日志
+#   菜单 9 维护第三方包清单，feeds install 后、make defconfig 前自动克隆
+#   清单位于 <脚本目录>/third-party-packages.conf，目标目录已有 Makefile 时跳过
 #
 # 日志:
 #   目录固定为 <脚本目录>/build-logs，日志文件固定为 build.log
@@ -927,8 +929,38 @@ ui_options() {
     done
 }
 
+ui_third_party() {
+    local f i target url ref
+    while true; do
+        f="$(third_party_file)"
+        i=0
+        printf '\n== 第三方包 ==\n'
+        printf '清单: %s\n' "$f"
+        if [ -f "$f" ] && [ -n "$(read_third_party)" ]; then
+            while read -r target url ref; do
+                i=$((i + 1))
+                if [ -f "$target/Makefile" ]; then
+                    printf ' %d) %s ← %s%s [已就位]\n' "$i" "$target" "$url" "${ref:+ ($ref)}"
+                else
+                    printf ' %d) %s ← %s%s\n' "$i" "$target" "$url" "${ref:+ ($ref)}"
+                fi
+            done < <(read_third_party)
+        else
+            printf '  （空）\n'
+        fi
+        printf '执行时机: feeds install 之后、make defconfig 之前；目标已有 Makefile 时跳过\n'
+        printf ' 1) 添加  2) 删除  b) 返回\n选择: '
+        read_menu
+        case "$MENU_KEY" in
+            1) third_party_add ;;
+            2) third_party_delete ;;
+            b|B|q|Q) return 0 ;;
+        esac
+    done
+}
+
 print_plan() {
-    local n=0 lvl i t data appclean=0
+    local n=0 lvl i t data appclean=0 tp
     lvl="$(eff_level)"
 
     if q_has app; then
@@ -993,6 +1025,10 @@ print_plan() {
         esac
     done < <(q_ordered)
 
+    tp="$(read_third_party | wc -l | tr -d ' ')"
+    if [ "$tp" -gt 0 ]; then
+        printf '  - [第三方包] %s 项（feeds 后按清单检查/克隆）\n' "$tp"
+    fi
     printf '  - [编译] %s\n' "$(build_desc)"
     printf '选项: 并发 %s | APP自动选中 %s | 预演 %s\n' \
         "$JOBS" \
@@ -1075,6 +1111,7 @@ ui_main() {
         menu_item '6、强制清理' '选包/内核/clean/dirclean/distclean → 清理后全量编译'
         menu_item '7、查看执行队列' '查看最近一次执行计划；可修改并发/预演等选项'
         menu_item '8、查看当前编译状态和日志' '源码/配置/feeds/磁盘状态 + 日志末尾'
+        menu_item '9、第三方包' '维护 feeds 安装后要克隆的第三方包清单'
         printf '0、退出\n'
         printf '选择: '
         read_menu
@@ -1087,6 +1124,7 @@ ui_main() {
             6) ui_flow_clean ;;
             7) ui_queue_view ;;
             8) ui_status_logs ;;
+            9) ui_third_party ;;
             0|q|Q) return 0 ;;
         esac
     done
@@ -1259,6 +1297,145 @@ config_task() {
     esac
 }
 
+# ---------------- 第三方包 ----------------
+
+# 清单与脚本同目录，每行「目标目录 仓库地址 [分支/标签]」；空行和 # 注释忽略
+third_party_file() {
+    printf '%s/third-party-packages.conf\n' "$SCRIPT_DIR"
+}
+
+read_third_party() {
+    local f
+    f="$(third_party_file)"
+    [ -f "$f" ] || return 0
+    awk '
+        { sub(/\r$/, "") }
+        /^[[:space:]]*#/ { next }
+        NF >= 2 { if ($3 != "") print $1, $2, $3; else print $1, $2 }
+    ' "$f"
+}
+
+third_party_valid_target() {
+    case "$1" in
+        package/*) ;;
+        *) printf '目标目录必须以 package/ 开头: %s\n' "$1" >&2; return 1 ;;
+    esac
+    case "/$1/" in
+        */../*|*/./*) printf '目标目录不能包含 . 或 .. 路径段: %s\n' "$1" >&2; return 1 ;;
+    esac
+    return 0
+}
+
+third_party_valid_url() {
+    case "$1" in
+        http://*|https://*|git://*|ssh://*|file://*|git@*) return 0 ;;
+    esac
+    printf '仓库地址需以 http://、https://、git://、ssh://、file:// 或 git@ 开头: %s\n' "$1" >&2
+    return 1
+}
+
+# 在 feeds install 之后、make defconfig 之前执行：缺失就克隆，目录已有 Makefile 则跳过
+third_party_ensure() {
+    local entries target url ref
+    entries="$(read_third_party)"
+    [ -n "$entries" ] || return 0
+    say ""
+    say "== 第三方包 =="
+    while read -r target url ref; do
+        if ! third_party_valid_target "$target" || ! third_party_valid_url "$url"; then
+            die "清单条目无效，请用主菜单 9 修正"
+        fi
+        if [ -f "$target/Makefile" ]; then
+            say "已就位: $target"
+            continue
+        fi
+        if [ -e "$target" ]; then
+            die "第三方包目录已存在但没有 Makefile: $target（请检查后手动删除）"
+        fi
+        if [ -n "$ref" ]; then
+            run git clone --depth 1 --branch="$ref" "$url" "$target"
+        else
+            run git clone --depth 1 "$url" "$target"
+        fi
+        if [ "$DRY_RUN" = 1 ]; then
+            continue
+        fi
+        if [ ! -f "$target/Makefile" ]; then
+            die "克隆后未找到 $target/Makefile，请检查仓库地址与分支"
+        fi
+        say "已克隆: $target"
+    done <<< "$entries"
+}
+
+third_party_add() {
+    local f target url ref
+    f="$(third_party_file)"
+    printf '目标目录相对源码根，须以 package/ 开头（如 package/luci-app-airoha-npu）\n'
+    target="$(ask_line '目标目录: ' '')" || return 0
+    target="$(normalize_input "$target")"
+    while [ "${target%/}" != "$target" ]; do
+        target="${target%/}"
+    done
+    if [ -z "$target" ]; then
+        printf '已取消。\n'
+        return 0
+    fi
+    if ! third_party_valid_target "$target"; then
+        return 0
+    fi
+    url="$(ask_line '仓库地址: ' '')" || return 0
+    if ! third_party_valid_url "$url"; then
+        return 0
+    fi
+    ref="$(ask_line '分支/标签（回车用默认分支）: ' '')" || return 0
+    case "$ref" in
+        -*) printf '分支/标签不能以 - 开头。\n'; return 0 ;;
+    esac
+    if [ -f "$f" ] && awk -v t="$target" '$1 == t { found = 1 } END { exit !found }' "$f"; then
+        printf '清单里已有该目标目录，先删除再添加。\n'
+        return 0
+    fi
+    if [ ! -f "$f" ]; then
+        printf '%s\n' \
+            '# 第三方包清单：每行「目标目录 仓库地址 [分支/标签]」' \
+            '# feeds 安装后、make defconfig 前自动克隆；目录已有 Makefile 时跳过' > "$f" ||
+            die "无法写入 $f"
+    fi
+    if [ -n "$ref" ]; then
+        printf '%s %s %s\n' "$target" "$url" "$ref" >> "$f"
+    else
+        printf '%s %s\n' "$target" "$url" >> "$f"
+    fi
+    printf '已添加: %s ← %s%s\n' "$target" "$url" "${ref:+ ($ref)}"
+}
+
+third_party_delete() {
+    local f n i target
+    local -a targets=()
+    f="$(third_party_file)"
+    mapfile -t targets < <(read_third_party | awk '{ print $1 }')
+    if [ "${#targets[@]}" -eq 0 ]; then
+        printf '清单为空。\n'
+        return 0
+    fi
+    for i in "${!targets[@]}"; do
+        printf ' %d) %s\n' "$((i + 1))" "${targets[$i]}"
+    done
+    n="$(ask_line '要删除的编号（回车取消）: ' '')" || return 0
+    case "$n" in
+        ''|*[!0-9]*) printf '已取消。\n'; return 0 ;;
+    esac
+    if [ "$n" -lt 1 ] || [ "$n" -gt "${#targets[@]}" ]; then
+        printf '编号超出范围。\n'
+        return 0
+    fi
+    target="${targets[$((n - 1))]}"
+    awk -v t="$target" '!/^[[:space:]]*#/ && $1 == t { next } { print }' "$f" > "$f.tmp" ||
+        die "无法写入 $f.tmp"
+    mv "$f.tmp" "$f" || die "无法更新 $f"
+    printf '已删除: %s\n' "$target"
+}
+
 execute_queue_body() {
     preflight
     say "== 队列开始: $(q_summary) =="
@@ -1294,6 +1471,8 @@ execute_queue_body() {
         say "== feeds 更新 =="
         feeds_update_task
     fi
+
+    third_party_ensure
 
     if q_has config; then
         i="$(q_idx config)"
